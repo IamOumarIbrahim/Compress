@@ -1,0 +1,25 @@
+# PyInstaller and Python build directories
+build/
+dist/
+__pycache__/
+*.spec
+
+# User outputs and temporary folders
+DONE/
+*.mp3
+*.mp4
+*.m4a
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.pdf
+*.docx
+*.pptx
+*.zip
+temp_*/
+
+# Local config files
+.idea/
+.vscode/
+.git/
