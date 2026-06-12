@@ -4,6 +4,8 @@ import sys
 import threading
 import io
 import zipfile
+import shutil
+import tempfile
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
@@ -11,7 +13,6 @@ from PIL import Image
 from pypdf import PdfReader, PdfWriter
 
 def find_ffmpeg_tools():
-    # Check if ffmpeg/ffprobe are in PATH
     try:
         subprocess.run(["ffmpeg", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.run(["ffprobe", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -19,7 +20,6 @@ def find_ffmpeg_tools():
     except FileNotFoundError:
         pass
 
-    # Search in Winget Packages folder
     winget_dir = os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WinGet\Packages")
     if os.path.exists(winget_dir):
         ffmpeg_path = None
@@ -32,7 +32,6 @@ def find_ffmpeg_tools():
             if ffmpeg_path and ffprobe_path:
                 return ffmpeg_path, ffprobe_path
 
-    # Fallback defaults
     return "ffmpeg", "ffprobe"
 
 def get_audio_duration(ffprobe_path, input_file):
@@ -66,12 +65,30 @@ def compress_audio(input_file, output_dir, max_size_mb=15.0, log_callback=print)
     log_callback(f"Raw target bitrate: {raw_bitrate_kbps:.2f} kbps")
     
     _, ext = os.path.splitext(input_file.lower())
-    if ext == ".m4a":
+    if ext in ('.wav', '.flac', '.wma'):
+        # Transcode to highly compressed mp3
+        codec = "libmp3lame"
+        out_ext = ".mp3"
+        log_callback(f"Transcoding lossless {ext} to compressed .mp3.")
+        
+        standard_bitrates = [8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320]
+        selected_kbps = 8
+        for b in sorted(standard_bitrates, reverse=True):
+            if b <= raw_bitrate_kbps:
+                selected_kbps = b
+                break
+    elif ext == ".ogg":
+        codec = "libvorbis"
+        out_ext = ".ogg"
+        selected_kbps = min(256, max(16, int(raw_bitrate_kbps)))
+    elif ext in (".m4a", ".aac"):
         codec = "aac"
+        out_ext = ext
         selected_kbps = min(256, max(16, int(raw_bitrate_kbps)))
     else:
+        # Default MP3
         codec = "libmp3lame"
-        ext = ".mp3"
+        out_ext = ".mp3"
         standard_bitrates = [8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320]
         selected_kbps = 8
         for b in sorted(standard_bitrates, reverse=True):
@@ -83,7 +100,7 @@ def compress_audio(input_file, output_dir, max_size_mb=15.0, log_callback=print)
     
     filename = os.path.basename(input_file)
     base, _ = os.path.splitext(filename)
-    output_file = os.path.join(output_dir, base + ext)
+    output_file = os.path.join(output_dir, base + out_ext)
     
     cmd = [ffmpeg_path, "-y", "-i", input_file, "-map", "0:a:0", "-codec:a", codec]
     
@@ -97,7 +114,7 @@ def compress_audio(input_file, output_dir, max_size_mb=15.0, log_callback=print)
         
     cmd.extend(["-b:a", f"{selected_kbps}k", output_file])
     
-    log_callback(f"Running FFmpeg command: {' '.join(cmd)}")
+    log_callback(f"Running FFmpeg: {' '.join(cmd)}")
     
     try:
         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -139,8 +156,14 @@ def compress_video(input_file, output_dir, max_size_mb=15.0, log_callback=print)
     log_callback(f"Allocated bitrates: Video {video_bitrate_kbps} kbps, Audio {audio_bitrate_kbps} kbps")
     
     filename = os.path.basename(input_file)
-    base, _ = os.path.splitext(filename)
-    output_file = os.path.join(output_dir, base + ".mp4")
+    base, ext = os.path.splitext(filename)
+    
+    out_ext = ext
+    if ext.lower() in ('.webm', '.wmv'):
+        log_callback(f"Transcoding {ext} to standard .mp4 for better compression speed.")
+        out_ext = '.mp4'
+        
+    output_file = os.path.join(output_dir, base + out_ext)
     
     scale_filter = []
     if video_bitrate_kbps < 200:
@@ -213,6 +236,14 @@ def compress_image(input_path, output_path, max_size_mb, log_callback=print):
             if attempt >= 2:
                 img_temp = img_temp.convert('P', palette=Image.ADAPTIVE, colors=256)
             img_temp.save(img_bytes, format='PNG', optimize=True)
+        elif img_format == 'WEBP' or ext == '.webp':
+            img_temp.save(img_bytes, format='WEBP', quality=quality, optimize=True)
+        elif img_format == 'BMP' or ext == '.bmp':
+            # BMP does not support lossy compression, we just scale down
+            img_temp.save(img_bytes, format='BMP')
+        elif img_format == 'TIFF' or ext in ('.tiff', '.tif'):
+            # Save TIFF with LZW compression
+            img_temp.save(img_bytes, format='TIFF', compression='tiff_lzw')
         elif img_format == 'GIF' or ext == '.gif':
             if getattr(img, "is_animated", False):
                 frames = []
@@ -285,7 +316,7 @@ def compress_pdf(input_path, output_path, max_size_mb, log_callback=print):
                     f.write(data)
                 return True
         except Exception as e:
-            log_callback(f"PDF compression error at attempt {attempt+1}: {e}")
+            log_callback(f"PDF compression error: {e}")
             return False
             
         quality = max(20, quality - 20)
@@ -348,7 +379,7 @@ def compress_docx_pptx(input_path, output_path, max_size_mb, log_callback=print)
                     f.write(compressed_data)
                 return True
         except Exception as e:
-            log_callback(f"Error compressing Docx/Pptx at attempt {attempt+1}: {e}")
+            log_callback(f"Error compressing Docx/Pptx/Xlsx: {e}")
             return False
             
         quality = max(20, quality - 20)
@@ -357,6 +388,90 @@ def compress_docx_pptx(input_path, output_path, max_size_mb, log_callback=print)
     with open(output_path, 'wb') as f:
         f.write(compressed_data)
     return False
+
+def compress_zip(input_path, output_path, max_size_mb, log_callback=print):
+    target_bytes = max_size_mb * 1024 * 1024
+    temp_dir = tempfile.mkdtemp(prefix="temp_zip_")
+    
+    try:
+        log_callback("Extracting zip archive...")
+        with zipfile.ZipFile(input_path, 'r') as z:
+            z.extractall(temp_dir)
+            
+        compressible_files = []
+        total_compressible_size = 0
+        
+        compressible_exts = (
+            '.mp3', '.m4a', '.wav', '.flac', '.ogg', '.aac', '.wma',
+            '.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv', '.wmv',
+            '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff',
+            '.pdf', '.docx', '.pptx', '.xlsx'
+        )
+        
+        for root, dirs, files in os.walk(temp_dir):
+            for file in files:
+                file_path = os.path.join(root, file)
+                _, ext = os.path.splitext(file.lower())
+                size = os.path.getsize(file_path)
+                
+                if ext in compressible_exts:
+                    compressible_files.append((file_path, size))
+                    total_compressible_size += size
+                    
+        log_callback(f"Found {len(compressible_files)} compressible file(s) inside zip (Total size: {total_compressible_size/(1024*1024):.2f} MB)")
+        
+        if total_compressible_size > 0:
+            budget_for_compressible = target_bytes * 0.90
+            scale_factor = min(1.0, budget_for_compressible / total_compressible_size)
+            log_callback(f"Compression scaling factor for zip elements: {scale_factor:.2f}")
+            
+            for file_path, original_size in compressible_files:
+                file_target_mb = (original_size * scale_factor) / (1024 * 1024)
+                file_target_mb = max(0.2, file_target_mb)
+                
+                log_callback(f"Optimizing: {os.path.basename(file_path)} -> Target {file_target_mb:.2f} MB")
+                
+                out_dir = os.path.dirname(file_path)
+                filename = os.path.basename(file_path)
+                temp_out = os.path.join(out_dir, "zipcomp_" + filename)
+                
+                success = False
+                _, ext = os.path.splitext(file_path.lower())
+                
+                if ext in ('.mp3', '.m4a', '.wav', '.flac', '.ogg', '.aac', '.wma'):
+                    success = compress_audio(file_path, out_dir, file_target_mb, lambda x: None)
+                elif ext in ('.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv', '.wmv'):
+                    success = compress_video(file_path, out_dir, file_target_mb, lambda x: None)
+                elif ext in ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff'):
+                    success = compress_image(file_path, temp_out, file_target_mb, lambda x: None)
+                elif ext == '.pdf':
+                    success = compress_pdf(file_path, temp_out, file_target_mb, lambda x: None)
+                elif ext in ('.docx', '.pptx', '.xlsx'):
+                    success = compress_docx_pptx(file_path, temp_out, file_target_mb, lambda x: None)
+                    
+                if success:
+                    if os.path.exists(temp_out):
+                        os.replace(temp_out, file_path)
+                else:
+                    if os.path.exists(temp_out):
+                        os.remove(temp_out)
+                        
+        log_callback("Re-packing zip archive...")
+        with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as z_out:
+            for root, dirs, files in os.walk(temp_dir):
+                for file in files:
+                    full_path = os.path.join(root, file)
+                    rel_path = os.path.relpath(full_path, temp_dir)
+                    z_out.write(full_path, rel_path)
+                    
+        final_size = os.path.getsize(output_path)
+        log_callback(f"ZIP packing complete! Final size: {final_size/(1024*1024):.2f} MB")
+        return True
+    except Exception as e:
+        log_callback(f"Error compressing ZIP archive: {e}")
+        return False
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 def compress_file(input_file, output_dir, max_size_mb=15.0, log_callback=print):
     if not os.path.isfile(input_file):
@@ -370,26 +485,42 @@ def compress_file(input_file, output_dir, max_size_mb=15.0, log_callback=print):
     log_callback(f"Processing compression for {filename} (target: {max_size_mb} MB)")
     
     success = False
-    if ext in ('.mp3', '.m4a'):
+    
+    # Audio extension list
+    audio_exts = ('.mp3', '.m4a', '.wav', '.flac', '.ogg', '.aac', '.wma')
+    # Video extension list
+    video_exts = ('.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv', '.wmv')
+    # Image extension list
+    image_exts = ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff')
+    
+    if ext in audio_exts:
         success = compress_audio(input_file, output_dir, max_size_mb, log_callback)
-    elif ext == '.mp4':
+    elif ext in video_exts:
         success = compress_video(input_file, output_dir, max_size_mb, log_callback)
-    elif ext in ('.jpg', '.jpeg', '.png', '.gif'):
+    elif ext in image_exts:
         output_file = os.path.join(output_dir, filename)
         success = compress_image(input_file, output_file, max_size_mb, log_callback)
     elif ext == '.pdf':
         output_file = os.path.join(output_dir, filename)
         success = compress_pdf(input_file, output_file, max_size_mb, log_callback)
-    elif ext in ('.docx', '.pptx'):
+    elif ext in ('.docx', '.pptx', '.xlsx'):
         output_file = os.path.join(output_dir, filename)
         success = compress_docx_pptx(input_file, output_file, max_size_mb, log_callback)
+    elif ext == '.zip':
+        output_file = os.path.join(output_dir, filename)
+        success = compress_zip(input_file, output_file, max_size_mb, log_callback)
     else:
         log_callback(f"Error: Unsupported file extension '{ext}'")
         return False
         
     if success:
-        # Get final output path
-        out_ext = ".mp4" if ext == ".mp4" else ext
+        # Check resolved output filename
+        out_ext = ext
+        if ext in ('.wav', '.flac', '.wma'):
+            out_ext = '.mp3'
+        elif ext in ('.webm', '.wmv'):
+            out_ext = '.mp4'
+            
         base, _ = os.path.splitext(filename)
         output_file_path = os.path.join(output_dir, base + out_ext)
         if os.path.exists(output_file_path):
@@ -407,7 +538,7 @@ def compress_file(input_file, output_dir, max_size_mb=15.0, log_callback=print):
 class AudioCompressorGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Media Compressor (All Formats)")
+        self.root.title("Media Compressor v0.2")
         self.root.geometry("600x480")
         self.root.minsize(500, 400)
         
@@ -421,7 +552,7 @@ class AudioCompressorGUI:
         main_frame.pack(fill=tk.BOTH, expand=True)
         
         # Input File Selection
-        lbl_input = ttk.Label(main_frame, text="Input File (Audio, Video, Images, Documents):", font=("Segoe UI", 10, "bold"))
+        lbl_input = ttk.Label(main_frame, text="Input File:", font=("Segoe UI", 10, "bold"))
         lbl_input.pack(anchor=tk.W, pady=(0, 2))
         
         input_entry_frame = ttk.Frame(main_frame)
@@ -477,12 +608,13 @@ class AudioCompressorGUI:
         
     def browse_input(self):
         file_types = [
-            ("All supported media", "*.mp3 *.m4a *.mp4 *.jpg *.jpeg *.png *.gif *.pdf *.docx *.pptx"),
-            ("Audio files", "*.mp3 *.m4a"),
-            ("Video files", "*.mp4"),
-            ("Image files", "*.jpg *.jpeg *.png *.gif"),
+            ("All supported files", "*.mp3 *.m4a *.wav *.flac *.ogg *.aac *.wma *.mp4 *.mkv *.avi *.mov *.webm *.flv *.wmv *.jpg *.jpeg *.png *.gif *.webp *.bmp *.tiff *.pdf *.docx *.pptx *.xlsx *.zip"),
+            ("Audio files", "*.mp3 *.m4a *.wav *.flac *.ogg *.aac *.wma"),
+            ("Video files", "*.mp4 *.mkv *.avi *.mov *.webm *.flv *.wmv"),
+            ("Image files", "*.jpg *.jpeg *.png *.gif *.webp *.bmp *.tiff"),
             ("PDF Documents", "*.pdf"),
-            ("Word/Powerpoint Documents", "*.docx *.pptx"),
+            ("Office Documents", "*.docx *.pptx *.xlsx"),
+            ("Zip Archives", "*.zip"),
             ("All files", "*.*")
         ]
         file_path = filedialog.askopenfilename(filetypes=file_types)
@@ -506,7 +638,7 @@ class AudioCompressorGUI:
         size_str = self.size_var.get().strip()
         
         if not input_file:
-            messagebox.showerror("Error", "Please select an input audio file.")
+            messagebox.showerror("Error", "Please select an input file.")
             return
             
         if not output_dir:
