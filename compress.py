@@ -45,7 +45,31 @@ def get_audio_duration(ffprobe_path, input_file):
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
     return float(result.stdout.strip())
 
-def compress_audio(input_file, output_dir, max_size_mb=15.0, log_callback=print):
+def get_atempo_filter(speed):
+    if speed == 1.0:
+        return ""
+    filters = []
+    temp_speed = speed
+    while temp_speed > 2.0:
+        filters.append("atempo=2.0")
+        temp_speed /= 2.0
+    while temp_speed < 0.5:
+        filters.append("atempo=0.5")
+        temp_speed /= 0.5
+    if temp_speed != 1.0:
+        filters.append(f"atempo={temp_speed:.4f}")
+    return ",".join(filters)
+
+def format_duration(seconds):
+    secs = int(seconds)
+    hours = secs // 3600
+    minutes = (secs % 3600) // 60
+    remaining_secs = secs % 60
+    if hours > 0:
+        return f"{hours:02d}:{minutes:02d}:{remaining_secs:02d}"
+    return f"{minutes:02d}:{remaining_secs:02d}"
+
+def compress_audio(input_file, output_dir, max_size_mb=15.0, speed=1.0, log_callback=print):
     ffmpeg_path, ffprobe_path = find_ffmpeg_tools()
     log_callback(f"Using ffmpeg: {ffmpeg_path}")
     log_callback(f"Using ffprobe: {ffprobe_path}")
@@ -56,7 +80,12 @@ def compress_audio(input_file, output_dir, max_size_mb=15.0, log_callback=print)
         log_callback(f"Error reading duration: {e}")
         return False
         
-    log_callback(f"Audio duration: {duration:.2f} seconds ({duration/60:.2f} minutes)")
+    original_duration = duration
+    if speed != 1.0:
+        duration = original_duration / speed
+        log_callback(f"Audio duration adjusted for speed ({speed}x): {original_duration:.2f}s ➔ {duration:.2f}s")
+    else:
+        log_callback(f"Audio duration: {duration:.2f} seconds ({duration/60:.2f} minutes)")
     
     target_size_bytes = max_size_mb * 1024 * 1024 * 0.96
     target_total_bits = target_size_bytes * 8
@@ -66,7 +95,6 @@ def compress_audio(input_file, output_dir, max_size_mb=15.0, log_callback=print)
     
     _, ext = os.path.splitext(input_file.lower())
     if ext in ('.wav', '.flac', '.wma'):
-        # Transcode to highly compressed mp3
         codec = "libmp3lame"
         out_ext = ".mp3"
         log_callback(f"Transcoding lossless {ext} to compressed .mp3.")
@@ -86,7 +114,6 @@ def compress_audio(input_file, output_dir, max_size_mb=15.0, log_callback=print)
         out_ext = ext
         selected_kbps = min(256, max(16, int(raw_bitrate_kbps)))
     else:
-        # Default MP3
         codec = "libmp3lame"
         out_ext = ".mp3"
         standard_bitrates = [8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320]
@@ -112,6 +139,11 @@ def compress_audio(input_file, output_dir, max_size_mb=15.0, log_callback=print)
         log_callback("Lowering sampling rate to 22050 Hz to reduce artifacts at very low bitrate.")
         cmd.extend(["-ar", "22050"])
         
+    if speed != 1.0:
+        atempo_str = get_atempo_filter(speed)
+        if atempo_str:
+            cmd.extend(["-filter:a", atempo_str])
+            
     cmd.extend(["-b:a", f"{selected_kbps}k", output_file])
     
     log_callback(f"Running FFmpeg: {' '.join(cmd)}")
@@ -131,7 +163,7 @@ def compress_audio(input_file, output_dir, max_size_mb=15.0, log_callback=print)
         log_callback(f"Error running FFmpeg: {e}")
         return False
 
-def compress_video(input_file, output_dir, max_size_mb=15.0, log_callback=print):
+def compress_video(input_file, output_dir, max_size_mb=15.0, speed=1.0, log_callback=print):
     ffmpeg_path, ffprobe_path = find_ffmpeg_tools()
     log_callback(f"Using ffmpeg: {ffmpeg_path}")
     log_callback(f"Using ffprobe: {ffprobe_path}")
@@ -142,7 +174,22 @@ def compress_video(input_file, output_dir, max_size_mb=15.0, log_callback=print)
         log_callback(f"Error reading video duration: {e}")
         return False
         
-    log_callback(f"Video duration: {duration:.2f} seconds ({duration/60:.2f} minutes)")
+    original_duration = duration
+    if speed != 1.0:
+        duration = original_duration / speed
+        log_callback(f"Video duration adjusted for speed ({speed}x): {original_duration:.2f}s ➔ {duration:.2f}s")
+    else:
+        log_callback(f"Video duration: {duration:.2f} seconds ({duration/60:.2f} minutes)")
+    
+    # Check if video has an audio stream
+    has_audio = True
+    try:
+        cmd_probe = [ffprobe_path, "-v", "error", "-select_streams", "a", "-show_entries", "stream=codec_type", "-of", "csv=p=0", input_file]
+        res = subprocess.run(cmd_probe, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if not res.stdout.strip():
+            has_audio = False
+    except Exception:
+        pass
     
     target_size_bytes = max_size_mb * 1024 * 1024 * 0.94
     target_total_bits = target_size_bytes * 8
@@ -150,9 +197,13 @@ def compress_video(input_file, output_dir, max_size_mb=15.0, log_callback=print)
     target_overall_bitrate_kbps = (target_total_bits / duration) / 1000
     log_callback(f"Target overall bitrate: {target_overall_bitrate_kbps:.2f} kbps")
     
-    audio_bitrate_kbps = min(128, max(32, int(target_overall_bitrate_kbps * 0.15)))
-    video_bitrate_kbps = max(50, int(target_overall_bitrate_kbps - audio_bitrate_kbps))
-    
+    if has_audio:
+        audio_bitrate_kbps = min(128, max(32, int(target_overall_bitrate_kbps * 0.15)))
+        video_bitrate_kbps = max(50, int(target_overall_bitrate_kbps - audio_bitrate_kbps))
+    else:
+        audio_bitrate_kbps = 0
+        video_bitrate_kbps = max(50, int(target_overall_bitrate_kbps))
+        
     log_callback(f"Allocated bitrates: Video {video_bitrate_kbps} kbps, Audio {audio_bitrate_kbps} kbps")
     
     filename = os.path.basename(input_file)
@@ -179,17 +230,24 @@ def compress_video(input_file, output_dir, max_size_mb=15.0, log_callback=print)
         log_callback("Bitrate is high. Downscaling video to 720p.")
         scale_filter = ["-vf", "scale=-2:720"]
         
-    cmd = [
-        ffmpeg_path, "-y", "-i", input_file,
-        "-codec:v", "libx264", "-preset", "medium",
-        "-b:v", f"{video_bitrate_kbps}k"
-    ]
+    cmd = [ffmpeg_path, "-y", "-i", input_file]
+    
+    if speed != 1.0:
+        cmd.extend(["-filter:v", f"setpts=PTS/{speed}"])
+        
+    cmd.extend(["-codec:v", "libx264", "-preset", "medium", "-b:v", f"{video_bitrate_kbps}k"])
     cmd.extend(scale_filter)
-    cmd.extend([
-        "-codec:a", "aac", "-b:a", f"{audio_bitrate_kbps}k",
-        "-ac", "1",
-        output_file
-    ])
+    
+    if has_audio:
+        cmd.extend(["-map", "0:a:0", "-codec:a", "aac", "-b:a", f"{audio_bitrate_kbps}k"])
+        if audio_bitrate_kbps < 64:
+            cmd.extend(["-ac", "1"])
+        if speed != 1.0:
+            atempo_str = get_atempo_filter(speed)
+            if atempo_str:
+                cmd.extend(["-filter:a", atempo_str])
+                
+    cmd.append(output_file)
     
     log_callback(f"Running video compression: {' '.join(cmd)}")
     
@@ -208,7 +266,7 @@ def compress_video(input_file, output_dir, max_size_mb=15.0, log_callback=print)
         log_callback(f"Error running FFmpeg: {e}")
         return False
 
-def compress_image(input_path, output_path, max_size_mb, log_callback=print):
+def compress_image(input_path, output_path, max_size_mb, user_scale=1.0, log_callback=print):
     target_bytes = max_size_mb * 1024 * 1024
     _, ext = os.path.splitext(input_path.lower())
     
@@ -221,7 +279,7 @@ def compress_image(input_path, output_path, max_size_mb, log_callback=print):
     img_format = img.format or ('JPEG' if ext in ('.jpg', '.jpeg') else 'PNG' if ext == '.png' else 'GIF')
     
     quality = 85
-    scale = 1.0
+    scale = user_scale
     
     for attempt in range(5):
         img_temp = img.copy()
@@ -239,10 +297,8 @@ def compress_image(input_path, output_path, max_size_mb, log_callback=print):
         elif img_format == 'WEBP' or ext == '.webp':
             img_temp.save(img_bytes, format='WEBP', quality=quality, optimize=True)
         elif img_format == 'BMP' or ext == '.bmp':
-            # BMP does not support lossy compression, we just scale down
             img_temp.save(img_bytes, format='BMP')
         elif img_format == 'TIFF' or ext in ('.tiff', '.tif'):
-            # Save TIFF with LZW compression
             img_temp.save(img_bytes, format='TIFF', compression='tiff_lzw')
         elif img_format == 'GIF' or ext == '.gif':
             if getattr(img, "is_animated", False):
@@ -281,7 +337,8 @@ def compress_image(input_path, output_path, max_size_mb, log_callback=print):
             return True
             
         quality = max(20, quality - 20)
-        scale = max(0.3, scale - 0.2)
+        if attempt >= 2:
+            scale = scale * 0.8
         
     with open(output_path, 'wb') as f:
         f.write(data)
@@ -439,11 +496,11 @@ def compress_zip(input_path, output_path, max_size_mb, log_callback=print):
                 _, ext = os.path.splitext(file_path.lower())
                 
                 if ext in ('.mp3', '.m4a', '.wav', '.flac', '.ogg', '.aac', '.wma'):
-                    success = compress_audio(file_path, out_dir, file_target_mb, lambda x: None)
+                    success = compress_audio(file_path, out_dir, file_target_mb, 1.0, lambda x: None)
                 elif ext in ('.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv', '.wmv'):
-                    success = compress_video(file_path, out_dir, file_target_mb, lambda x: None)
+                    success = compress_video(file_path, out_dir, file_target_mb, 1.0, lambda x: None)
                 elif ext in ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff'):
-                    success = compress_image(file_path, temp_out, file_target_mb, lambda x: None)
+                    success = compress_image(file_path, temp_out, file_target_mb, 1.0, lambda x: None)
                 elif ext == '.pdf':
                     success = compress_pdf(file_path, temp_out, file_target_mb, lambda x: None)
                 elif ext in ('.docx', '.pptx', '.xlsx'):
@@ -473,7 +530,7 @@ def compress_zip(input_path, output_path, max_size_mb, log_callback=print):
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
-def compress_file(input_file, output_dir, max_size_mb=15.0, log_callback=print):
+def compress_file(input_file, output_dir, max_size_mb=15.0, speed=1.0, image_scale=1.0, log_callback=print):
     if not os.path.isfile(input_file):
         log_callback(f"Error: Input file '{input_file}' not found.")
         return False
@@ -486,20 +543,17 @@ def compress_file(input_file, output_dir, max_size_mb=15.0, log_callback=print):
     
     success = False
     
-    # Audio extension list
     audio_exts = ('.mp3', '.m4a', '.wav', '.flac', '.ogg', '.aac', '.wma')
-    # Video extension list
     video_exts = ('.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv', '.wmv')
-    # Image extension list
     image_exts = ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff')
     
     if ext in audio_exts:
-        success = compress_audio(input_file, output_dir, max_size_mb, log_callback)
+        success = compress_audio(input_file, output_dir, max_size_mb, speed, log_callback)
     elif ext in video_exts:
-        success = compress_video(input_file, output_dir, max_size_mb, log_callback)
+        success = compress_video(input_file, output_dir, max_size_mb, speed, log_callback)
     elif ext in image_exts:
         output_file = os.path.join(output_dir, filename)
-        success = compress_image(input_file, output_file, max_size_mb, log_callback)
+        success = compress_image(input_file, output_file, max_size_mb, image_scale, log_callback)
     elif ext == '.pdf':
         output_file = os.path.join(output_dir, filename)
         success = compress_pdf(input_file, output_file, max_size_mb, log_callback)
@@ -514,7 +568,6 @@ def compress_file(input_file, output_dir, max_size_mb=15.0, log_callback=print):
         return False
         
     if success:
-        # Check resolved output filename
         out_ext = ext
         if ext in ('.wav', '.flac', '.wma'):
             out_ext = '.mp3'
@@ -538,14 +591,17 @@ def compress_file(input_file, output_dir, max_size_mb=15.0, log_callback=print):
 class AudioCompressorGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Media Compressor v0.2")
-        self.root.geometry("600x480")
-        self.root.minsize(500, 400)
+        self.root.title("Media Compressor v0.3")
+        self.root.geometry("600x560")
+        self.root.minsize(550, 480)
         
         self.style = ttk.Style()
         self.style.theme_use("clam")
         
         self.create_widgets()
+        
+        # Trace input variable to probe file info
+        self.input_path_var.trace_add("write", self.on_path_changed)
         
     def create_widgets(self):
         main_frame = ttk.Frame(self.root, padding="15")
@@ -580,15 +636,66 @@ class AudioCompressorGUI:
         btn_browse_output.pack(side=tk.RIGHT)
         
         # Settings Frame (Target Size)
-        settings_frame = ttk.Frame(main_frame)
-        settings_frame.pack(fill=tk.X, pady=(0, 15))
+        self.settings_frame = ttk.Frame(main_frame)
+        self.settings_frame.pack(fill=tk.X, pady=(0, 10))
         
-        lbl_size = ttk.Label(settings_frame, text="Target Size Limit (MB):", font=("Segoe UI", 10, "bold"))
+        lbl_size = ttk.Label(self.settings_frame, text="Target Size Limit (MB):", font=("Segoe UI", 10, "bold"))
         lbl_size.pack(side=tk.LEFT, padx=(0, 10))
         
         self.size_var = tk.StringVar(value="15.0")
-        self.size_entry = ttk.Entry(settings_frame, textvariable=self.size_var, width=10)
+        self.size_entry = ttk.Entry(self.settings_frame, textvariable=self.size_var, width=10)
         self.size_entry.pack(side=tk.LEFT)
+        
+        self.lbl_conditional_status = ttk.Label(self.settings_frame, text="", font=("Segoe UI", 9, "italic"))
+        self.lbl_conditional_status.pack(side=tk.RIGHT, padx=10)
+        
+        # Conditional Options Container Frame
+        self.conditional_container = ttk.Frame(main_frame)
+        self.conditional_container.pack(fill=tk.X, pady=(0, 10))
+        
+        # Speed Frame (Audio/Video speed adjuster)
+        self.speed_frame = ttk.LabelFrame(self.conditional_container, text="Speed Settings (Audio & Video)", padding="10")
+        
+        lbl_speed = ttk.Label(self.speed_frame, text="Speed Multiplier:")
+        lbl_speed.pack(anchor=tk.W)
+        
+        self.speed_var = tk.DoubleVar(value=1.0)
+        self.speed_slider = ttk.Scale(
+            self.speed_frame, from_=0.5, to=3.0,
+            variable=self.speed_var, command=self.update_speed_preview
+        )
+        self.speed_slider.pack(fill=tk.X, expand=True, pady=5)
+        
+        lbl_speed_val_frame = ttk.Frame(self.speed_frame)
+        lbl_speed_val_frame.pack(fill=tk.X)
+        
+        self.lbl_speed_val = ttk.Label(lbl_speed_val_frame, text="1.0x", font=("Segoe UI", 9, "bold"))
+        self.lbl_speed_val.pack(side=tk.LEFT)
+        
+        self.lbl_speed_preview = ttk.Label(lbl_speed_val_frame, text="Duration: 00:00 ➔ 00:00", font=("Segoe UI", 9, "italic"))
+        self.lbl_speed_preview.pack(side=tk.RIGHT)
+        
+        # Image Resize Frame (Image dimensions scaling)
+        self.image_resize_frame = ttk.LabelFrame(self.conditional_container, text="Image Resize Options", padding="10")
+        
+        lbl_scale = ttk.Label(self.image_resize_frame, text="Resize Scale (Dimensions):")
+        lbl_scale.pack(anchor=tk.W)
+        
+        self.image_scale_var = tk.IntVar(value=100)
+        self.image_slider = ttk.Scale(
+            self.image_resize_frame, from_=10, to=100,
+            variable=self.image_scale_var, command=self.update_image_preview
+        )
+        self.image_slider.pack(fill=tk.X, expand=True, pady=5)
+        
+        lbl_image_val_frame = ttk.Frame(self.image_resize_frame)
+        lbl_image_val_frame.pack(fill=tk.X)
+        
+        self.lbl_image_scale_val = ttk.Label(lbl_image_val_frame, text="100%", font=("Segoe UI", 9, "bold"))
+        self.lbl_image_scale_val.pack(side=tk.LEFT)
+        
+        self.lbl_image_preview = ttk.Label(lbl_image_val_frame, text="Resolution: 0x0 ➔ 0x0 px", font=("Segoe UI", 9, "italic"))
+        self.lbl_image_preview.pack(side=tk.RIGHT)
         
         # Action Button
         self.btn_compress = ttk.Button(main_frame, text="Start Compression", command=self.start_compression_thread)
@@ -603,7 +710,7 @@ class AudioCompressorGUI:
         lbl_logs = ttk.Label(main_frame, text="Logs:", font=("Segoe UI", 9))
         lbl_logs.pack(anchor=tk.W)
         
-        self.log_text = ScrolledText(main_frame, height=10, state=tk.DISABLED, font=("Consolas", 9))
+        self.log_text = ScrolledText(main_frame, height=8, state=tk.DISABLED, font=("Consolas", 9))
         self.log_text.pack(fill=tk.BOTH, expand=True)
         
     def browse_input(self):
@@ -631,6 +738,93 @@ class AudioCompressorGUI:
         self.log_text.insert(tk.END, message + "\n")
         self.log_text.see(tk.END)
         self.log_text.config(state=tk.DISABLED)
+        
+    def update_speed_preview(self, val=None):
+        try:
+            speed = float(self.speed_var.get())
+        except ValueError:
+            speed = 1.0
+        self.lbl_speed_val.config(text=f"{speed:.1f}x")
+        
+        if hasattr(self, "original_duration"):
+            new_duration = self.original_duration / speed
+            orig_str = format_duration(self.original_duration)
+            new_str = format_duration(new_duration)
+            self.lbl_speed_preview.config(text=f"Duration: {orig_str} ➔ {new_str}")
+            
+    def update_image_preview(self, val=None):
+        try:
+            scale_percent = int(self.image_scale_var.get())
+        except ValueError:
+            scale_percent = 100
+        self.lbl_image_scale_val.config(text=f"{scale_percent}%")
+        
+        if hasattr(self, "original_width") and hasattr(self, "original_height"):
+            new_w = int(self.original_width * (scale_percent / 100.0))
+            new_h = int(self.original_height * (scale_percent / 100.0))
+            self.lbl_image_preview.config(text=f"Resolution: {self.original_width}×{self.original_height} ➔ {new_w}×{new_h} px")
+            
+    def on_path_changed(self, *args):
+        file_path = self.input_path_var.get().strip()
+        self.start_probing(file_path)
+        
+    def start_probing(self, file_path):
+        if not file_path or not os.path.isfile(file_path):
+            self.hide_all_conditional_frames()
+            return
+        self.lbl_conditional_status.config(text="Probing file...", foreground="blue")
+        threading.Thread(target=self.probe_metadata_thread, args=(file_path,), daemon=True).start()
+        
+    def probe_metadata_thread(self, file_path):
+        _, ext = os.path.splitext(file_path.lower())
+        
+        audio_exts = ('.mp3', '.m4a', '.wav', '.flac', '.ogg', '.aac', '.wma')
+        video_exts = ('.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv', '.wmv')
+        image_exts = ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff')
+        
+        if ext in audio_exts or ext in video_exts:
+            ffmpeg_path, ffprobe_path = find_ffmpeg_tools()
+            try:
+                duration = get_audio_duration(ffprobe_path, file_path)
+                self.root.after(0, self.setup_audio_video_ui, duration)
+            except Exception as e:
+                self.root.after(0, self.log_probing_error, f"Probe error: {e}")
+        elif ext in image_exts:
+            try:
+                # Open image headers only to get size quickly
+                with Image.open(file_path) as img:
+                    w, h = img.size
+                self.root.after(0, self.setup_image_ui, w, h)
+            except Exception as e:
+                self.root.after(0, self.log_probing_error, f"Probe error: {e}")
+        else:
+            self.root.after(0, self.hide_all_conditional_frames)
+            
+    def hide_all_conditional_frames(self):
+        self.speed_frame.pack_forget()
+        self.image_resize_frame.pack_forget()
+        self.lbl_conditional_status.config(text="")
+        if hasattr(self, "original_duration"):
+            delattr(self, "original_duration")
+        if hasattr(self, "original_width"):
+            delattr(self, "original_width")
+            
+    def log_probing_error(self, err_msg):
+        self.hide_all_conditional_frames()
+        self.lbl_conditional_status.config(text=err_msg, foreground="red")
+        
+    def setup_audio_video_ui(self, duration):
+        self.hide_all_conditional_frames()
+        self.original_duration = duration
+        self.speed_frame.pack(fill=tk.X, expand=True, pady=5)
+        self.update_speed_preview()
+        
+    def setup_image_ui(self, w, h):
+        self.hide_all_conditional_frames()
+        self.original_width = w
+        self.original_height = h
+        self.image_resize_frame.pack(fill=tk.X, expand=True, pady=5)
+        self.update_image_preview()
         
     def start_compression_thread(self):
         input_file = self.input_path_var.get().strip()
@@ -660,24 +854,46 @@ class AudioCompressorGUI:
         self.btn_compress.config(state=tk.DISABLED)
         self.status_var.set("Compressing...")
         
+        # Extract slider parameters
+        speed = 1.0
+        image_scale = 1.0
+        
+        _, ext = os.path.splitext(input_file.lower())
+        audio_exts = ('.mp3', '.m4a', '.wav', '.flac', '.ogg', '.aac', '.wma')
+        video_exts = ('.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv', '.wmv')
+        image_exts = ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff')
+        
+        if ext in audio_exts or ext in video_exts:
+            try:
+                speed = float(self.speed_var.get())
+            except ValueError:
+                pass
+        elif ext in image_exts:
+            try:
+                image_scale = int(self.image_scale_var.get()) / 100.0
+            except ValueError:
+                pass
+                
         thread = threading.Thread(
             target=self.run_compression,
-            args=(input_file, output_dir, max_size_mb),
+            args=(input_file, output_dir, max_size_mb, speed, image_scale),
             daemon=True
         )
         thread.start()
         
-    def run_compression(self, input_file, output_dir, max_size_mb):
+    def run_compression(self, input_file, output_dir, max_size_mb, speed, image_scale):
         def log_cb(msg):
             self.root.after(0, self.log, msg)
             
-        success = compress_file(input_file, output_dir, max_size_mb, log_cb)
+        success = compress_file(input_file, output_dir, max_size_mb, speed, image_scale, log_cb)
         
         def done():
             self.btn_compress.config(state=tk.NORMAL)
             if success:
                 self.status_var.set("Success!")
                 messagebox.showinfo("Success", "Compression completed successfully!")
+                # Re-probe the path to refresh dimensions or durations on screen if outputting in-place
+                self.start_probing(input_file)
             else:
                 self.status_var.set("Failed")
                 messagebox.showerror("Error", "Compression failed. See logs for details.")
@@ -686,21 +902,27 @@ class AudioCompressorGUI:
 
 def main():
     if len(sys.argv) > 1:
-        input_file = sys.argv[1]
-        output_dir = r"c:\Dev\tools\Compress\DONE"
-        max_size = 15.0
+        # CLI Mode
+        import argparse
+        parser = argparse.ArgumentParser(description="Media Compressor CLI Tool")
+        parser.add_argument("input_file", help="Path to input file")
+        parser.add_argument("output_dir", nargs="?", default=r"c:\Dev\tools\Compress\DONE", help="Destination folder")
+        parser.add_argument("target_size", type=float, nargs="?", default=15.0, help="Target MB size limit")
+        parser.add_argument("-s", "--speed", type=float, default=1.0, help="Speed multiplier (0.5x to 3.0x) for audio/video")
+        parser.add_argument("-r", "--resize", type=float, default=1.0, help="Image resize scale factor (0.1 to 1.0)")
         
-        if len(sys.argv) > 2:
-            output_dir = sys.argv[2]
-        if len(sys.argv) > 3:
-            try:
-                max_size = float(sys.argv[3])
-            except ValueError:
-                pass
-                
-        success = compress_file(input_file, output_dir, max_size)
+        args = parser.parse_args()
+        
+        success = compress_file(
+            args.input_file,
+            args.output_dir,
+            args.target_size,
+            args.speed,
+            args.resize
+        )
         sys.exit(0 if success else 1)
     else:
+        # GUI Mode
         root = tk.Tk()
         app = AudioCompressorGUI(root)
         root.mainloop()
