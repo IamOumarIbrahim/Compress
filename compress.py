@@ -6,10 +6,11 @@ import io
 import zipfile
 import shutil
 import tempfile
+import datetime
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
-from PIL import Image
+from PIL import Image, ImageTk
 from pypdf import PdfReader, PdfWriter
 
 def find_ffmpeg_tools():
@@ -216,27 +217,30 @@ def compress_video(input_file, output_dir, max_size_mb=15.0, speed=1.0, log_call
         
     output_file = os.path.join(output_dir, base + out_ext)
     
-    scale_filter = []
+    scale_val = 720
     if video_bitrate_kbps < 200:
         log_callback("Bitrate is very low. Downscaling video to 240p.")
-        scale_filter = ["-vf", "scale=-2:240"]
+        scale_val = 240
     elif video_bitrate_kbps < 500:
         log_callback("Bitrate is low. Downscaling video to 360p.")
-        scale_filter = ["-vf", "scale=-2:360"]
+        scale_val = 360
     elif video_bitrate_kbps < 1000:
         log_callback("Bitrate is moderate. Downscaling video to 480p.")
-        scale_filter = ["-vf", "scale=-2:480"]
+        scale_val = 480
     else:
         log_callback("Bitrate is high. Downscaling video to 720p.")
-        scale_filter = ["-vf", "scale=-2:720"]
+        scale_val = 720
         
     cmd = [ffmpeg_path, "-y", "-i", input_file]
     
+    # Combine speed and scaling filters into a single video filter chain
+    video_filters = []
     if speed != 1.0:
-        cmd.extend(["-filter:v", f"setpts=PTS/{speed}"])
-        
+        video_filters.append(f"setpts=PTS/{speed}")
+    video_filters.append(f"scale=-2:{scale_val}")
+    
+    cmd.extend(["-vf", ",".join(video_filters)])
     cmd.extend(["-codec:v", "libx264", "-preset", "medium", "-b:v", f"{video_bitrate_kbps}k"])
-    cmd.extend(scale_filter)
     
     if has_audio:
         cmd.extend(["-map", "0:a:0", "-codec:a", "aac", "-b:a", f"{audio_bitrate_kbps}k"])
@@ -591,27 +595,43 @@ def compress_file(input_file, output_dir, max_size_mb=15.0, speed=1.0, image_sca
 class AudioCompressorGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Media Compressor v0.3")
-        self.root.geometry("600x560")
-        self.root.minsize(550, 480)
+        self.root.title("Media Compressor v0.4")
+        self.root.geometry("1050x650")
+        self.root.minsize(950, 550)
         
         self.style = ttk.Style()
         self.style.theme_use("clam")
         
         self.create_widgets()
         
-        # Trace input variable to probe file info
+        # Trace input and output variables to update previews
         self.input_path_var.trace_add("write", self.on_path_changed)
+        self.output_path_var.trace_add("write", self.on_output_path_changed)
+        
+        # Initial load of output folder contents
+        self.refresh_folder_preview()
         
     def create_widgets(self):
-        main_frame = ttk.Frame(self.root, padding="15")
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        # Master container split into Left and Right panels
+        container = ttk.Frame(self.root, padding="15")
+        container.pack(fill=tk.BOTH, expand=True)
+        
+        # Left Panel (Inputs, Settings, Sliders, Logs)
+        left_panel = ttk.Frame(container, padding="5")
+        left_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # Right Panel (File Preview, Output Directory Contents)
+        right_panel = ttk.Frame(container, padding="5", width=380)
+        right_panel.pack(side=tk.RIGHT, fill=tk.BOTH, expand=False, padx=(10, 0))
+        right_panel.pack_propagate(False)
+        
+        # --- LEFT PANEL WIDGETS ---
         
         # Input File Selection
-        lbl_input = ttk.Label(main_frame, text="Input File:", font=("Segoe UI", 10, "bold"))
+        lbl_input = ttk.Label(left_panel, text="Input File:", font=("Segoe UI", 10, "bold"))
         lbl_input.pack(anchor=tk.W, pady=(0, 2))
         
-        input_entry_frame = ttk.Frame(main_frame)
+        input_entry_frame = ttk.Frame(left_panel)
         input_entry_frame.pack(fill=tk.X, pady=(0, 10))
         
         self.input_path_var = tk.StringVar()
@@ -622,10 +642,10 @@ class AudioCompressorGUI:
         btn_browse_input.pack(side=tk.RIGHT)
         
         # Output Directory Selection
-        lbl_output = ttk.Label(main_frame, text="Output Directory:", font=("Segoe UI", 10, "bold"))
+        lbl_output = ttk.Label(left_panel, text="Output Directory:", font=("Segoe UI", 10, "bold"))
         lbl_output.pack(anchor=tk.W, pady=(0, 2))
         
-        output_entry_frame = ttk.Frame(main_frame)
+        output_entry_frame = ttk.Frame(left_panel)
         output_entry_frame.pack(fill=tk.X, pady=(0, 10))
         
         self.output_path_var = tk.StringVar(value=r"c:\Dev\tools\Compress\DONE")
@@ -636,7 +656,7 @@ class AudioCompressorGUI:
         btn_browse_output.pack(side=tk.RIGHT)
         
         # Settings Frame (Target Size)
-        self.settings_frame = ttk.Frame(main_frame)
+        self.settings_frame = ttk.Frame(left_panel)
         self.settings_frame.pack(fill=tk.X, pady=(0, 10))
         
         lbl_size = ttk.Label(self.settings_frame, text="Target Size Limit (MB):", font=("Segoe UI", 10, "bold"))
@@ -650,7 +670,7 @@ class AudioCompressorGUI:
         self.lbl_conditional_status.pack(side=tk.RIGHT, padx=10)
         
         # Conditional Options Container Frame
-        self.conditional_container = ttk.Frame(main_frame)
+        self.conditional_container = ttk.Frame(left_panel)
         self.conditional_container.pack(fill=tk.X, pady=(0, 10))
         
         # Speed Frame (Audio/Video speed adjuster)
@@ -697,21 +717,65 @@ class AudioCompressorGUI:
         self.lbl_image_preview = ttk.Label(lbl_image_val_frame, text="Resolution: 0x0 ➔ 0x0 px", font=("Segoe UI", 9, "italic"))
         self.lbl_image_preview.pack(side=tk.RIGHT)
         
-        # Action Button
-        self.btn_compress = ttk.Button(main_frame, text="Start Compression", command=self.start_compression_thread)
-        self.btn_compress.pack(fill=tk.X, pady=(0, 10))
+        # Action Buttons (Start Compression & Go to File Location)
+        action_frame = ttk.Frame(left_panel)
+        action_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        self.btn_compress = ttk.Button(action_frame, text="Start Compression", command=self.start_compression_thread)
+        self.btn_compress.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        
+        self.btn_open_folder = ttk.Button(action_frame, text="Go to File Location", command=self.open_output_location, state=tk.DISABLED)
+        self.btn_open_folder.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(5, 0))
         
         # Status
         self.status_var = tk.StringVar(value="Ready")
-        self.lbl_status = ttk.Label(main_frame, textvariable=self.status_var, font=("Segoe UI", 9, "italic"))
+        self.lbl_status = ttk.Label(left_panel, textvariable=self.status_var, font=("Segoe UI", 9, "italic"))
         self.lbl_status.pack(anchor=tk.W, pady=(0, 5))
         
         # Logs
-        lbl_logs = ttk.Label(main_frame, text="Logs:", font=("Segoe UI", 9))
+        lbl_logs = ttk.Label(left_panel, text="Logs:", font=("Segoe UI", 9))
         lbl_logs.pack(anchor=tk.W)
         
-        self.log_text = ScrolledText(main_frame, height=8, state=tk.DISABLED, font=("Consolas", 9))
+        self.log_text = ScrolledText(left_panel, height=8, state=tk.DISABLED, font=("Consolas", 9))
         self.log_text.pack(fill=tk.BOTH, expand=True)
+        
+        # --- RIGHT PANEL WIDGETS ---
+        
+        # Selected File Preview Frame
+        preview_frame = ttk.LabelFrame(right_panel, text="Selected File Preview", padding="10")
+        preview_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        self.lbl_preview_img = ttk.Label(preview_frame, anchor=tk.CENTER)
+        self.lbl_preview_img.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
+        
+        self.lbl_preview_info = ttk.Label(preview_frame, text="No file selected", font=("Segoe UI", 9), justify=tk.LEFT, anchor=tk.W)
+        self.lbl_preview_info.pack(fill=tk.X)
+        
+        # Output Folder Preview Frame
+        folder_frame = ttk.LabelFrame(right_panel, text="Output Folder Contents", padding="10")
+        folder_frame.pack(fill=tk.BOTH, expand=True)
+        
+        tree_scroll = ttk.Scrollbar(folder_frame)
+        tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.tree_folder = ttk.Treeview(
+            folder_frame, columns=("Size", "Modified"),
+            yscrollcommand=tree_scroll.set
+        )
+        self.tree_folder.pack(fill=tk.BOTH, expand=True)
+        tree_scroll.config(command=self.tree_folder.yview)
+        
+        # Columns settings
+        self.tree_folder.heading("#0", text="File Name", anchor=tk.W)
+        self.tree_folder.heading("Size", text="Size", anchor=tk.W)
+        self.tree_folder.heading("Modified", text="Modified", anchor=tk.W)
+        
+        self.tree_folder.column("#0", width=180, minwidth=120)
+        self.tree_folder.column("Size", width=80, minwidth=60, stretch=tk.FALSE)
+        self.tree_folder.column("Modified", width=110, minwidth=80, stretch=tk.FALSE)
+        
+        # Bind double click to open the file location
+        self.tree_folder.bind("<Double-1>", self.on_tree_double_click)
         
     def browse_input(self):
         file_types = [
@@ -768,6 +832,9 @@ class AudioCompressorGUI:
         file_path = self.input_path_var.get().strip()
         self.start_probing(file_path)
         
+    def on_output_path_changed(self, *args):
+        self.refresh_folder_preview()
+        
     def start_probing(self, file_path):
         if not file_path or not os.path.isfile(file_path):
             self.hide_all_conditional_frames()
@@ -791,7 +858,6 @@ class AudioCompressorGUI:
                 self.root.after(0, self.log_probing_error, f"Probe error: {e}")
         elif ext in image_exts:
             try:
-                # Open image headers only to get size quickly
                 with Image.open(file_path) as img:
                     w, h = img.size
                 self.root.after(0, self.setup_image_ui, w, h)
@@ -808,7 +874,8 @@ class AudioCompressorGUI:
             delattr(self, "original_duration")
         if hasattr(self, "original_width"):
             delattr(self, "original_width")
-            
+        self.update_file_preview(self.input_path_var.get().strip())
+        
     def log_probing_error(self, err_msg):
         self.hide_all_conditional_frames()
         self.lbl_conditional_status.config(text=err_msg, foreground="red")
@@ -826,6 +893,112 @@ class AudioCompressorGUI:
         self.image_resize_frame.pack(fill=tk.X, expand=True, pady=5)
         self.update_image_preview()
         
+    def refresh_folder_preview(self):
+        # Clear existing items
+        for item in self.tree_folder.get_children():
+            self.tree_folder.delete(item)
+            
+        output_dir = self.output_path_var.get().strip()
+        if not output_dir or not os.path.isdir(output_dir):
+            return
+            
+        try:
+            for entry in os.scandir(output_dir):
+                if entry.is_file():
+                    stat = entry.stat()
+                    size_mb = stat.st_size / (1024 * 1024)
+                    mtime = datetime.datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
+                    ext = os.path.splitext(entry.name)[1].upper()
+                    self.tree_folder.insert(
+                        "", tk.END,
+                        text=entry.name,
+                        values=(f"{size_mb:.2f} MB", mtime, ext)
+                    )
+        except Exception:
+            pass
+            
+    def update_file_preview(self, file_path):
+        # Clear previous preview image and text
+        self.lbl_preview_img.config(image="")
+        self.lbl_preview_img.image = None
+        self.lbl_preview_info.config(text="No file selected")
+        
+        if not file_path or not os.path.isfile(file_path):
+            return
+            
+        filename = os.path.basename(file_path)
+        size_mb = os.path.getsize(file_path) / (1024 * 1024)
+        _, ext = os.path.splitext(file_path.lower())
+        
+        info_text = f"File: {filename}\nSize: {size_mb:.2f} MB\n"
+        
+        audio_exts = ('.mp3', '.m4a', '.wav', '.flac', '.ogg', '.aac', '.wma')
+        video_exts = ('.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv', '.wmv')
+        image_exts = ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff')
+        
+        if ext in image_exts:
+            try:
+                img = Image.open(file_path)
+                w, h = img.size
+                info_text += f"Type: Image ({img.format})\nResolution: {w}×{h} px"
+                
+                # Generate aspect-ratio scaled thumbnail
+                img_copy = img.copy()
+                img_copy.thumbnail((180, 180), Image.Resampling.LANCZOS)
+                photo = ImageTk.PhotoImage(img_copy)
+                self.lbl_preview_img.config(image=photo)
+                self.lbl_preview_img.image = photo  # keep a reference
+            except Exception as e:
+                info_text += f"\nImage error: {e}"
+        elif ext in audio_exts or ext in video_exts:
+            dur_str = "Unknown"
+            if hasattr(self, "original_duration"):
+                dur_str = format_duration(self.original_duration)
+            info_text += f"Type: {'Audio' if ext in audio_exts else 'Video'}\nDuration: {dur_str}"
+        elif ext == '.pdf':
+            try:
+                reader = PdfReader(file_path)
+                info_text += f"Type: PDF Document\nPages: {len(reader.pages)}"
+            except Exception:
+                info_text += "Type: PDF Document"
+        elif ext in ('.docx', '.pptx', '.xlsx'):
+            doc_type = 'Word Document' if ext == '.docx' else 'Powerpoint' if ext == '.pptx' else 'Excel Sheet'
+            info_text += f"Type: Office {doc_type}"
+        elif ext == '.zip':
+            try:
+                with zipfile.ZipFile(file_path, 'r') as z:
+                    num_files = len(z.namelist())
+                info_text += f"Type: ZIP Archive\nContains: {num_files} elements"
+            except Exception:
+                info_text += "Type: ZIP Archive"
+        else:
+            info_text += f"Type: {ext.upper()[1:]} File"
+            
+        self.lbl_preview_info.config(text=info_text)
+        
+    def open_output_location(self):
+        if hasattr(self, "last_output_path") and os.path.exists(self.last_output_path):
+            path = os.path.normpath(self.last_output_path)
+            try:
+                subprocess.Popen(f'explorer /select,"{path}"')
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to open location: {e}")
+                
+    def on_tree_double_click(self, event):
+        selected_item = self.tree_folder.selection()
+        if not selected_item:
+            return
+        filename = self.tree_folder.item(selected_item[0], "text")
+        output_dir = self.output_path_var.get().strip()
+        if os.path.isdir(output_dir):
+            file_path = os.path.join(output_dir, filename)
+            if os.path.exists(file_path):
+                path = os.path.normpath(file_path)
+                try:
+                    subprocess.Popen(f'explorer /select,"{path}"')
+                except Exception as e:
+                    messagebox.showerror("Error", f"Failed to open location: {e}")
+                    
     def start_compression_thread(self):
         input_file = self.input_path_var.get().strip()
         output_dir = self.output_path_var.get().strip()
@@ -852,6 +1025,7 @@ class AudioCompressorGUI:
         self.log_text.config(state=tk.DISABLED)
         
         self.btn_compress.config(state=tk.DISABLED)
+        self.btn_open_folder.config(state=tk.DISABLED)
         self.status_var.set("Compressing...")
         
         # Extract slider parameters
@@ -874,6 +1048,17 @@ class AudioCompressorGUI:
             except ValueError:
                 pass
                 
+        # Resolve output path
+        filename = os.path.basename(input_file)
+        _, ext_out = os.path.splitext(filename.lower())
+        out_ext = ext_out
+        if ext_out in ('.wav', '.flac', '.wma'):
+            out_ext = '.mp3'
+        elif ext_out in ('.webm', '.wmv'):
+            out_ext = '.mp4'
+        base, _ = os.path.splitext(filename)
+        self.last_output_path = os.path.join(output_dir, base + out_ext)
+        
         thread = threading.Thread(
             target=self.run_compression,
             args=(input_file, output_dir, max_size_mb, speed, image_scale),
@@ -891,11 +1076,13 @@ class AudioCompressorGUI:
             self.btn_compress.config(state=tk.NORMAL)
             if success:
                 self.status_var.set("Success!")
+                self.btn_open_folder.config(state=tk.NORMAL)
+                self.refresh_folder_preview()
                 messagebox.showinfo("Success", "Compression completed successfully!")
-                # Re-probe the path to refresh dimensions or durations on screen if outputting in-place
                 self.start_probing(input_file)
             else:
                 self.status_var.set("Failed")
+                self.btn_open_folder.config(state=tk.DISABLED)
                 messagebox.showerror("Error", "Compression failed. See logs for details.")
                 
         self.root.after(0, done)

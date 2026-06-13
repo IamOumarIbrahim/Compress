@@ -1,4 +1,4 @@
-# ⚡ Media Compressor (v0.3)
+# ⚡ Media Compressor (v0.4)
 
 [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![FFmpeg](https://img.shields.io/badge/Dependency-FFmpeg-green.svg?style=flat-square&logo=ffmpeg&logoColor=white)](https://ffmpeg.org/)
@@ -7,7 +7,7 @@
 [![Compiler](https://img.shields.io/badge/Compiler-PyInstaller-blue.svg?style=flat-square)](https://pyinstaller.org/)
 [![License: CC0](https://img.shields.io/badge/License-CC0_1.0-lightgrey.svg?style=flat-square)](https://creativecommons.org/publicdomain/zero/1.0/)
 
-A premium, multi-format compression utility featuring a clean desktop GUI and a powerful command-line interface. Precisely compress audio, video, images, PDFs, Office documents, and ZIP archives to fit target sizes (such as **15MB** limits for messaging systems, email attachments, or web uploads).
+A premium, multi-format compression utility featuring a dual-pane desktop GUI and a powerful command-line interface. Precisely compress audio, video, images, PDFs, Office documents, and ZIP archives to fit target sizes (such as **15MB** limits for messaging systems, email attachments, or web uploads).
 
 ---
 
@@ -32,20 +32,22 @@ A premium, multi-format compression utility featuring a clean desktop GUI and a 
   - **PDF Documents**: `.pdf`
   - **Office Documents**: `.docx`, `.pptx`, `.xlsx`
   - **Archives**: `.zip`
-- 🎨 **Tkinter Clam Theme UI**: A clean, responsive dashboard designed for desktop convenience.
-- 🎯 **Precise Target Size Allocation**: Iteratively calculates bitrates, downscales resolution, and adjusts quality variables to fit output sizes strictly under limits (with a built-in safety headroom).
+- 🖥️ **Dual-Pane Desktop GUI (v0.4)**:
+  - **Left Pane (Control Center)**: Configure file inputs, targets, speed, and image resize parameters.
+  - **Right Pane (Preview Center)**:
+    - **Selected File Preview**: Displays live image thumbnails and detailed file metadata (durations, pages, sizes).
+    - **Output Folder Preview**: Lists files in the target directory (name, size, modification date) inside an interactive Treeview. Double-clicking any file highlights it instantly in Windows Explorer.
+- 📁 **Explorer Integration (v0.4)**:
+  - Added a **Go to File Location** button next to Start Compression that highlights the output file in Windows Explorer.
 - ⏩ **Speed Adjustments (v0.3)**: 
-  - Change speed factor of audio and video from `0.5x` to `3.0x` using a slider.
-  - Automatically chains FFmpeg's `atempo` filters for speeds > 2.0x to preserve audio pitch and synchronization.
-  - Real-time duration preview shows the output length (`Original` ➔ `Expected`) before processing.
-- 📐 **Image Resizing (v0.3)**: 
-  - Scale image dimensions from `10%` to `100%` using a slider.
-  - Live width × height pixel resolution preview dynamically calculates dimensions as you slide.
+  - Adjust speed multipliers from `0.5x` to `3.0x` with a live duration preview. 
+  - Correctly applies speed multiplier before compression (`setpts` + chained `atempo` filters) to maintain high video/audio pitch sync.
+- 📐 **Image Resizing**: 
+  - Scale image dimensions from `10%` to `100%` using a slider with a live resolution preview.
 - ⚙️ **Smart Document & Archive Compression**:
-  - Treats `.docx`, `.pptx`, and `.xlsx` files as OpenXML zip packages, extracting and optimizing only internal media assets (`word/media`, `ppt/media`, `xl/media`). This shrinks the document dramatically with 100% formatting and text integrity preserved.
+  - Treats `.docx`, `.pptx`, and `.xlsx` files as OpenXML zip packages, extracting and optimizing only internal media assets (`word/media`, `ppt/media`, `xl/media`) to preserve 100% formatting.
   - Compresses PDF streams and internal images using `pypdf`'s object optimization.
-  - Automatically unzips `.zip` archives, recursively compresses all compressible media files (images, audio, video, documents) inside using a relative target size budget, and re-packages them.
-- 💻 **Dual Mode**: Starts as a graphical user interface, or runs as a CLI for developer batch operations.
+  - Automatically unzips `.zip` archives, recursively compresses all compressible media files inside using a relative target size budget, and re-packages them.
 
 ---
 
@@ -56,13 +58,13 @@ The following block diagram illustrates the routing and processing pipelines of 
 ```mermaid
 graph TD
     User["User Input: File + Target Size"] --> ModeSelect{Execution Mode}
-    ModeSelect -->|GUI Mode| Tkinter[Tkinter UI Panel]
+    ModeSelect -->|GUI Mode| Tkinter[Tkinter Dual-Pane UI]
     ModeSelect -->|CLI Mode| Parser[CLI Argument Parser]
     Tkinter --> Config[Configuration Options: Speed & Scale]
     Parser --> Config
     Config --> Router{File Format Router}
     
-    Router -->|Audio/Video| FFmpeg["FFmpeg & FFprobe Pipeline"]
+    Router -->|Audio/Video| FFmpeg["FFmpeg speed-then-compress Pipeline"]
     Router -->|Images| Pillow["Pillow Scale & Quality Optimizer"]
     Router -->|PDF Documents| PyPDF["pypdf Object & Stream Compressor"]
     Router -->|Office Docs| ZipFile["ZipFile Media Packer"]
@@ -132,6 +134,7 @@ python compress.py
 2. If it is an audio/video file, use the **Speed settings** slider to speed up/slow down the file.
 3. If it is an image, use the **Image Resize** slider to scale the resolution.
 4. Set the target size in MB, and click **Start Compression**.
+5. Once compression succeeds, click **Go to File Location** or double-click items in the folder preview tree to view the outputs.
 
 ### Option B: Command-Line Interface (CLI)
 For batch tasks or scripting:
