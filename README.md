@@ -1,4 +1,4 @@
-# ⚡ Media Compressor (v0.2)
+# ⚡ Media Compressor (v0.3)
 
 [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![FFmpeg](https://img.shields.io/badge/Dependency-FFmpeg-green.svg?style=flat-square&logo=ffmpeg&logoColor=white)](https://ffmpeg.org/)
@@ -25,7 +25,7 @@ A premium, multi-format compression utility featuring a clean desktop GUI and a 
 
 ## ✨ Key Features
 
-- 📁 **Universal Format Support (v0.2)**: 
+- 📁 **Universal Format Support**: 
   - **Audio**: `.mp3`, `.m4a`, `.wav`, `.flac`, `.ogg`, `.aac`, `.wma`
   - **Video**: `.mp4`, `.mkv`, `.avi`, `.mov`, `.webm`, `.flv`, `.wmv`
   - **Images**: `.jpg`, `.jpeg`, `.png`, `.gif`, `.webp`, `.bmp`, `.tiff`
@@ -34,6 +34,13 @@ A premium, multi-format compression utility featuring a clean desktop GUI and a 
   - **Archives**: `.zip`
 - 🎨 **Tkinter Clam Theme UI**: A clean, responsive dashboard designed for desktop convenience.
 - 🎯 **Precise Target Size Allocation**: Iteratively calculates bitrates, downscales resolution, and adjusts quality variables to fit output sizes strictly under limits (with a built-in safety headroom).
+- ⏩ **Speed Adjustments (v0.3)**: 
+  - Change speed factor of audio and video from `0.5x` to `3.0x` using a slider.
+  - Automatically chains FFmpeg's `atempo` filters for speeds > 2.0x to preserve audio pitch and synchronization.
+  - Real-time duration preview shows the output length (`Original` ➔ `Expected`) before processing.
+- 📐 **Image Resizing (v0.3)**: 
+  - Scale image dimensions from `10%` to `100%` using a slider.
+  - Live width × height pixel resolution preview dynamically calculates dimensions as you slide.
 - ⚙️ **Smart Document & Archive Compression**:
   - Treats `.docx`, `.pptx`, and `.xlsx` files as OpenXML zip packages, extracting and optimizing only internal media assets (`word/media`, `ppt/media`, `xl/media`). This shrinks the document dramatically with 100% formatting and text integrity preserved.
   - Compresses PDF streams and internal images using `pypdf`'s object optimization.
@@ -44,19 +51,19 @@ A premium, multi-format compression utility featuring a clean desktop GUI and a 
 
 ## ⚙️ System Architecture
 
-The following block diagram illustrates the application's routing mechanism and processing pipelines:
+The following block diagram illustrates the routing and processing pipelines of the compressor:
 
 ```mermaid
 graph TD
     User["User Input: File + Target Size"] --> ModeSelect{Execution Mode}
     ModeSelect -->|GUI Mode| Tkinter[Tkinter UI Panel]
     ModeSelect -->|CLI Mode| Parser[CLI Argument Parser]
-    Tkinter --> Config[Configuration Options]
+    Tkinter --> Config[Configuration Options: Speed & Scale]
     Parser --> Config
     Config --> Router{File Format Router}
     
     Router -->|Audio/Video| FFmpeg["FFmpeg & FFprobe Pipeline"]
-    Router -->|Images| Pillow["Pillow Iterative Optimizer"]
+    Router -->|Images| Pillow["Pillow Scale & Quality Optimizer"]
     Router -->|PDF Documents| PyPDF["pypdf Object & Stream Compressor"]
     Router -->|Office Docs| ZipFile["ZipFile Media Packer"]
     Router -->|Zip Archives| ZipPack["ZIP Recursive Packer"]
@@ -88,7 +95,7 @@ This utility requires **Python 3.8+** and **FFmpeg** installed on your system.
   ```
 
 ### 2️⃣ Install Python Libraries
-Install the core compression dependencies:
+Install the core dependencies:
 ```bash
 pip install Pillow pypdf
 ```
@@ -121,13 +128,19 @@ Run the script to open the interactive utility panel:
 ```bash
 python compress.py
 ```
-Select your input file, choose the destination directory, set the target size in MB, and click **Start Compression**.
+1. Select your input file.
+2. If it is an audio/video file, use the **Speed settings** slider to speed up/slow down the file.
+3. If it is an image, use the **Image Resize** slider to scale the resolution.
+4. Set the target size in MB, and click **Start Compression**.
 
 ### Option B: Command-Line Interface (CLI)
 For batch tasks or scripting:
 ```bash
-# Compress any media to a standard 15MB target (saves to c:\Dev\tools\Compress\DONE)
-python compress.py input.mp4
+# Compress a video to a standard 15MB target at 1.5x speed (saves to c:\Dev\tools\Compress\DONE)
+python compress.py input.mp4 -s 1.5
+
+# Compress and resize an image to 50% scale under 2MB
+python compress.py input.jpg output_dir 2.0 -r 0.5
 
 # Compress a PDF file to a custom target of 5MB in a specific directory
 python compress.py input.pdf output_dir 5.0
